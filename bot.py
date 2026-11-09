@@ -11,8 +11,8 @@ Ban Members, View Audit Log, Embed Links, Attach Files, Read Message History, Cr
 Change Nickname. The bot's role must sit ABOVE the Tier-1..5 roles and the ping roles.
 
 .env values:
-  DISCORD_TOKEN, ROBLOX_COOKIE (dedicated Roblox alt - never your main), CRUXER_DATA_DIR (persistent folder),
-  CRUXER_BACKUP_CHANNEL_ID (optional), RALVORA_API_URL / RALVORA_API_KEY (optional region API)
+  DISCORD_TOKEN, ROBLOX_COOKIE (optional Roblox presence/region lookup), CRUXER_DATA_DIR (persistent folder),
+  CRUXER_BACKUP_CHANNEL_ID (optional)
 
 DATA SAFETY: everything lives in cruxer_data.json (atomic saves, .bak, 48 snapshots, hourly DM backups,
 automatic restore from the newest Discord backup). Server templates (/store) are part of the backup.
@@ -52,12 +52,14 @@ load_dotenv()
 # ======================= CONFIG =======================
 
 BOT_NAME = "Cruxer"
+BOT_VERSION = os.getenv("BOT_VERSION", "2.37")
 LEGACY_BOT_NAME = "Imperium"  # only used to find/rename old categories, nicknames and read-me posts
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 DEVELOPER_ID = 1455426573741330495
 
 GUILD_ID = 1554169015662936114
+CRUXER_CATEGORY_ID = 1564252456454590584
 TICKET_CATEGORY_ID = 1564679069554188389
 BATTLE_PANEL_CHANNEL_ID = 1554169017592451175
 RAID_RESULTS_CHANNEL_ID = 1554468736440729650
@@ -72,8 +74,9 @@ PING_ROLE_ID = 0
 EMBED_COLOR = 0x2B2D31
 GREEN, RED, YELLOW, BLUE = 0x57F287, 0xED4245, 0xFEE75C, 0x5865F2
 
-AUTHORIZE_CATEGORY_NAME = "Crusher Tickets"
-CATEGORY_NAMES = {BOT_NAME.lower(), LEGACY_BOT_NAME.lower(), "crusher tickets"}
+AUTHORIZE_CATEGORY_NAME = "Cruxer tickets"
+CRUXER_CATEGORY_NAME = "Cruxer"
+CATEGORY_NAMES = {"cruxer tickets", "crusher tickets"}
 BATTLE_PANEL_CHANNEL_NAME = "battle-panel"
 RAID_RESULTS_CHANNEL_NAME = "raid-results"
 LEADERBOARD_CHANNEL_NAME = "leaderboard"
@@ -118,8 +121,6 @@ RATE_WINDOW_SECONDS = 24 * 60 * 60
 ANTINUKE_WINDOW_SECONDS = 600
 
 ROBLOX_COOKIE = os.getenv("ROBLOX_COOKIE")
-RALVORA_API_URL = os.getenv("RALVORA_API_URL")
-RALVORA_API_KEY = os.getenv("RALVORA_API_KEY") or os.getenv("ROBLOX_API_KEY")
 TRACKER_POLL_SECONDS = 10
 MAX_TRACKED_PER_GUILD = 25
 JOIN_WARNING_SECONDS = 180
@@ -148,12 +149,27 @@ SEARCH_MAX_SHOWN = 20
 RAID_PING_ROLE_ID = 1558114795536908418
 BACKUP_PING_ROLE_ID = 1558114863723716790
 REGION_PING_ROLES = {
-    "global": (1565042400374554785, "Global Teamers Support"),
-    "india": (1565042500253646948, "India-ASIA Support"),
-    "singapore": (1565042605782212628, "Singapore-ASIA Support"),
-    "japan": (1565042686787059933, "Japan-ASIA Support"),
-    "uk": (1565042765002182737, "UK-EUROPE Support"),
-    "na": (1565042817129119794, "NA-Countries Support"),
+    "asia": (0, "Asia"),
+    "europe": (0, "Europe"),
+    "africa": (0, "Africa"),
+    "middle_east": (0, "Middle East"),
+    "oceania": (0, "Oceania"),
+    "north_america": (0, "North America"),
+    "south_america": (0, "South America"),
+}
+GLOBAL_SUPPORT_ROLE_ID = 1565042400374554785
+SPECIFIC_REGION_SUPPORT_ROLES = {
+    "india": (1565042500253646948, "India-ASIA Teamers Support"),
+    "singapore": (1565042605782212628, "Singapore-ASIA Teamers Support"),
+    "japan": (1565042686787059933, "Japan-ASIA Teamers Support"),
+    "uk": (1565042765002182737, "UK-EUROPE Teamers Support"),
+    "north_america": (1565042817129119794, "NA-Countries Teamers Support"),
+}
+GLOBAL_SUPPORT_ROLE_NAME = "Global Teamers Support"
+SUPPORT_ALERT_ROLES = {
+    "global": (GLOBAL_SUPPORT_ROLE_ID, GLOBAL_SUPPORT_ROLE_NAME),
+    **{f"region_{key}": value for key, value in SPECIFIC_REGION_SUPPORT_ROLES.items()},
+    **REGION_PING_ROLES,
 }
 RAID_PING_ROLE_NAME = "|Raid Ping|"
 BACKUP_PING_ROLE_NAME = "|Backup Ping|"
@@ -527,22 +543,62 @@ def ping_role_for(guild: discord.Guild, request_type: str):
     return find_named_role(guild, BACKUP_PING_ROLE_ID, BACKUP_PING_ROLE_NAME)
 
 
-def regional_ping_role_for(guild: discord.Guild, region: str | None):
+def regional_ping_key(region: str | None):
     value = (region or "").casefold()
-    if "india" in value or re.search(r"\b(in|india)\b", value):
-        key = "india"
-    elif "singapore" in value or re.search(r"\b(sg)\b", value):
-        key = "singapore"
-    elif "japan" in value or re.search(r"\b(jp)\b", value):
-        key = "japan"
-    elif "united kingdom" in value or "uk" in value or re.search(r"\b(gb)\b", value):
-        key = "uk"
-    elif value.startswith("na") or "north america" in value or any(x in value for x in ("united states", "canada", "mexico")):
-        key = "na"
+    middle_east_codes = {"ae", "bh", "iq", "ir", "jo", "kw", "lb", "om", "ps", "qa", "sa", "sy", "ye", "il"}
+    asia_codes = {"af", "am", "az", "bd", "bt", "bn", "kh", "cn", "ge", "hk", "in", "id", "jp", "kz", "kp", "kr", "kg", "la", "mo", "my", "mv", "mn", "mm", "np", "pk", "ph", "sg", "lk", "tw", "tj", "th", "tl", "tm", "uz", "vn"}
+    is_middle_east = "middle east" in value or any(re.search(rf"\b{code}\b", value) for code in middle_east_codes)
+    if is_middle_east:
+        key = "middle_east"
+    elif value.startswith(("af", "africa")) or "africa" in value:
+        key = "africa"
+    elif value.startswith(("eu", "europe")) or "europe" in value:
+        key = "europe"
+    elif value.startswith(("oce", "oc ", "oceania")) or "oceania" in value or any(x in value for x in ("australia", "new zealand")):
+        key = "oceania"
+    elif value.startswith(("na", "north america")) or "north america" in value or any(x in value for x in ("united states", "canada", "mexico")):
+        key = "north_america"
+    elif value.startswith(("sa", "south america")) or "south america" in value or any(x in value for x in ("brazil", "argentina", "chile", "colombia", "peru")):
+        key = "south_america"
+    elif value.startswith(("as", "asia")) or "asia" in value or any(re.search(rf"\b{code}\b", value) for code in asia_codes):
+        key = "asia"
     else:
-        key = "global"
+        return None
+    return key
+
+
+def regional_ping_role_for(guild: discord.Guild, region: str | None):
+    key = regional_ping_key(region)
+    if not key:
+        return None
     rid, name = REGION_PING_ROLES[key]
-    return find_named_role(guild, rid, name)
+    role = find_named_role(guild, rid, name)
+    if role:
+        return role
+    return discord.utils.find(
+        lambda candidate: name.casefold() in candidate.name.casefold(), guild.roles)
+
+
+def specific_region_support_role_for(guild: discord.Guild, region: str | None):
+    value = (region or "").casefold()
+    specific = None
+    if "india" in value or re.search(r"\bin\b", value):
+        specific = "india"
+    elif "singapore" in value or re.search(r"\bsg\b", value):
+        specific = "singapore"
+    elif "japan" in value or re.search(r"\bjp\b", value):
+        specific = "japan"
+    elif "united kingdom" in value or "uk" in value or "london" in value:
+        specific = "uk"
+    elif any(term in value for term in ("north america", "united states", "canada", "mexico", "ashburn", "us-east", "us-west")):
+        specific = "north_america"
+    if specific:
+        role_id, name = SPECIFIC_REGION_SUPPORT_ROLES[specific]
+        role = find_named_role(guild, role_id, name)
+        if role:
+            return role
+        return discord.utils.find(lambda candidate: name.casefold() in candidate.name.casefold(), guild.roles)
+    return regional_ping_role_for(guild, region)
 
 
 def tier_role(guild: discord.Guild, tier: int):
@@ -578,7 +634,8 @@ def request_limit_for(member) -> int:
 async def sync_tier_role(guild: discord.Guild, member: discord.Member):
     if not is_setup(guild.id):
         return None
-    if DATA.get("helper_warnings", {}).get(str(guild.id), {}).get(str(member.id), 0) > HELPER_WARNING_LIMIT:
+    if (member.id not in (DEVELOPER_ID, guild.owner_id)
+            and DATA.get("helper_warnings", {}).get(str(guild.id), {}).get(str(member.id), 0) > HELPER_WARNING_LIMIT):
         return None
     earned = tier_for_raids(get_raid_only_count(guild.id, member.id))
     if earned is None:
@@ -781,7 +838,8 @@ def saved_roblox_name(user_id: int):
 
 
 def find_category(guild: discord.Guild):
-    saved_id = DATA.get("category_map", {}).get(str(guild.id), 0)
+    saved_map = DATA.get("category_map", {}).get(str(guild.id), 0)
+    saved_id = saved_map.get("tickets", 0) if isinstance(saved_map, dict) else saved_map
     saved = guild.get_channel(saved_id) if saved_id else None
     if isinstance(saved, discord.CategoryChannel):
         return saved
@@ -790,6 +848,22 @@ def find_category(guild: discord.Guild):
         return category
     return discord.utils.find(
         lambda c: isinstance(c, discord.CategoryChannel) and c.name.lower() in CATEGORY_NAMES,
+        guild.categories,
+    )
+
+
+def find_cruxer_category(guild: discord.Guild):
+    saved_map = DATA.get("category_map", {}).get(str(guild.id), {})
+    saved_id = saved_map.get("cruxer", 0) if isinstance(saved_map, dict) else 0
+    saved = guild.get_channel(saved_id) if saved_id else None
+    if isinstance(saved, discord.CategoryChannel):
+        return saved
+    category = guild.get_channel(CRUXER_CATEGORY_ID)
+    if isinstance(category, discord.CategoryChannel):
+        return category
+    return discord.utils.find(
+        lambda c: isinstance(c, discord.CategoryChannel)
+        and c.name.casefold() in {CRUXER_CATEGORY_NAME.casefold(), LEGACY_BOT_NAME.casefold()},
         guild.categories,
     )
 
@@ -982,47 +1056,31 @@ def _truncate_field(lines: list[str], limit: int = 1000) -> str:
 # READ ME  (one channel, one card, always named Cruxer)
 # ======================================================
 
+def developer_profile_url() -> str:
+    return f"https://discord.com/users/{DEVELOPER_ID}"
+
+
 class ReadmeView(discord.ui.LayoutView):
     def __init__(self, guild_name: str = "your server", authorized: bool = True):
         super().__init__(timeout=None)
-        rules = discord.ui.Button(label="Rules", style=discord.ButtonStyle.secondary, custom_id="tsb:readme:rules")
-        commands_button = discord.ui.Button(label="See commands", style=discord.ButtonStyle.primary, custom_id="tsb:readme:commands")
-        rules.callback = self.rules_callback
-        commands_button.callback = self.commands_callback
-        state = "Authorized" if authorized else "Awaiting authorization"
+        developer_profile = discord.ui.Button(
+            label="Developer Profile", style=discord.ButtonStyle.link,
+            url=developer_profile_url())
         self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay(f"# {BOT_NAME}\n**Status:** {state}\n\n"
-                f"Welcome to **{guild_name}**. Cruxer coordinates Raid and Backup requests, records assists, and promotes helpers.\n\n"
-                "**Current updates**\n- Region support alerts and helper attendance warnings.\n"
-                "- Server owners can build channels or map existing ones with `/build`.\n"
-                "- New tier promotions are announced in the Promotions channel."),
-            discord.ui.ActionRow(rules, commands_button)))
-
-    async def rules_callback(self, interaction: discord.Interaction):
-        tiers = "\n".join(f"- **Tier-{t}:** {TIER_RAIDS_NEEDED[t]} assists" for t in sorted(TIER_RAIDS_NEEDED))
-        await interaction.response.send_message(view=card(
-            "## Cruxer Rules and Promotions",
-            "- Only requesters must link Roblox and request from their active, joinable server.\n"
-            "- Do not create fake alerts; they can result in a blacklist.\n"
-            "- Helpers must join the requested server and coordinate in the ticket.\n"
-            "- Helper warnings are tracked per server. More than 15 warnings removes the member's Tier role.",
-            SEP, "### Raider Promotion Thresholds\n" + tiers, footer=BOT_NAME), ephemeral=True)
-
-    async def commands_callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message(view=card(
-            "## Commands",
-            "- `/build` - create Cruxer channels or map channels you already have (server owner).\n"
-            "- `/setup` - create ping and Tier roles.\n- `/pings` - choose request and regional alerts.\n"
-            "- `/link` - link the requester's Roblox account.\n- `/customize` - change this server's Cruxer profile.\n"
-            "- `/set count` - set assists and synchronize a tier ([OWN]).\n- `/ping` - show bot health and server/member totals.",
-            footer=BOT_NAME), ephemeral=True)
+            discord.ui.TextDisplay(
+                f"# {BOT_NAME}\n"
+                "A custom-built support bot designed for Roblox Battleground experiences. "
+                "Cruxer helps players handle unfair battles, report issues, and get the support they need.\n\n"
+                "`Developer: @heistz1 | Heistz`"),
+            discord.ui.ActionRow(developer_profile)))
 
 
 def build_readme_view(guild: discord.Guild, authorized: bool):
     return ReadmeView(guild.name, authorized)
 
 
-async def create_or_update_readme(guild: discord.Guild, authorized: bool, target_channel: discord.TextChannel | None = None):
+async def create_or_update_readme(guild: discord.Guild, authorized: bool, target_channel: discord.TextChannel | None = None,
+                                 category: discord.CategoryChannel | None = None):
     """Maintains exactly one read-me channel with exactly one Cruxer message."""
     lock = _readme_locks.setdefault(guild.id, asyncio.Lock())
     async with lock:
@@ -1046,8 +1104,14 @@ async def create_or_update_readme(guild: discord.Guild, authorized: bool, target
                 }
                 existing = await guild.create_text_channel(
                     name=README_CHANNEL_NAME, overwrites=overwrites,
-                    topic=f"Information about {BOT_NAME}", reason=f"{BOT_NAME} Read-me channel",
+                    topic=f"Information about {BOT_NAME}", category=category,
+                    reason=f"{BOT_NAME} Read-me channel",
                 )
+            elif category is not None and existing.category_id != category.id:
+                try:
+                    await existing.edit(category=category, reason=f"{BOT_NAME} channel layout update")
+                except discord.HTTPException:
+                    pass
             elif LEGACY_BOT_NAME.lower() in (existing.topic or "").lower():
                 try:
                     await existing.edit(topic=f"Information about {BOT_NAME}")
@@ -1100,6 +1164,11 @@ def roblox_join_link(place_id, job_id) -> str:
     return f"https://www.roblox.com/games/start?placeId={place_id}&gameInstanceId={job_id}"
 
 
+def roblox_game_page_url(place_id) -> str:
+    """Open the official Roblox experience page when a specific server ID is unavailable."""
+    return f"https://www.roblox.com/games/{place_id}"
+
+
 async def roblox_json(session: aiohttp.ClientSession, url: str, **kwargs):
     try:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=8), **kwargs) as resp:
@@ -1139,8 +1208,10 @@ async def roblox_authed_post(session, url: str, payload: dict, extra_headers: di
     return None, None, {}
 
 
-def _region_tag(continent: str, lon):
+def _region_tag(continent: str, lon, country_code: str = ""):
     continent = (continent or "").upper()
+    if (country_code or "").upper() in {"AE", "BH", "IQ", "IR", "JO", "KW", "LB", "OM", "PS", "QA", "SA", "SY", "YE", "IL"}:
+        return "ME"
     if continent == "NA":
         if lon is None:
             return "NA"
@@ -1162,7 +1233,7 @@ def _format_region(data: dict):
         lon = float(data.get("longitude"))
     except (TypeError, ValueError):
         lon = None
-    tag = _region_tag(data.get("continent_code") or "", lon)
+    tag = _region_tag(data.get("continent_code") or "", lon, cc)
     if tag and place:
         return f"{tag} - {place}"
     return tag or place or None
@@ -1188,7 +1259,7 @@ async def detect_server_region(session: aiohttp.ClientSession, place_id, job_id)
     cache_key = f"{place_id}:{job_id}"
     if cache_key in REGION_CACHE:
         return REGION_CACHE[cache_key]
-    for lookup in (_try_ralvora, _try_gamejoin_region):
+    for lookup in (_try_gamejoin_region,):
         try:
             region = await lookup(session, place_id, job_id)
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError) as exc:
@@ -1199,19 +1270,6 @@ async def detect_server_region(session: aiohttp.ClientSession, place_id, job_id)
             if len(REGION_CACHE) > 500:
                 REGION_CACHE.pop(next(iter(REGION_CACHE)))
             return region
-    return None
-
-
-async def _try_ralvora(session: aiohttp.ClientSession, place_id, job_id):
-    if not RALVORA_API_URL:
-        return None
-    headers = {"Authorization": f"Bearer {RALVORA_API_KEY}"} if RALVORA_API_KEY else {}
-    data = await roblox_json(session, RALVORA_API_URL, params={"placeId": place_id, "jobId": job_id}, headers=headers)
-    if isinstance(data, dict):
-        for key in ("region", "server_region", "location", "country"):
-            value = data.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
     return None
 
 
@@ -1439,11 +1497,11 @@ def help_view():
         "## How to use the panel",
         "**1. Link your Roblox account**\n"
         "- Use `/link` once. Opening a ticket needs a linked account.\n"
-        "**2. Join your game**\n"
-        "- Be in your Roblox game with joins set to **Everyone**, so helpers can join you.\n"
+        "**2. Fill in the request form**\n"
+        "- Choose Raid or Backup, enter your Roblox username, and complete the request details.\n"
         "**3. Make the request**\n"
         "- Choose **Raid** (you need people to raid with you) or **Backup** (you are getting teamed on) from the menu.\n"
-        "- Fill in the form. Your server link and region are found automatically.\n"
+        "- After submitting, Cruxer checks whether the entered account is in a joinable server when Roblox verification is enabled.\n"
         "**4. Wait for helpers**\n"
         "- Helpers press Join Raid in your private ticket. Their Roblox profiles are shown in the ticket.\n"
         "**5. End the ticket**\n"
@@ -1473,16 +1531,9 @@ async def start_request_flow(interaction: discord.Interaction, request_type: str
     if not allowed:
         return await interaction.response.send_message(rate_limit_text(count, resets, limit), ephemeral=True)
 
-    state, prefilled_link = "skip", None
-    try:
-        state, prefilled_link = await asyncio.wait_for(join_check(interaction.user.id), timeout=2.2)
-    except Exception:
-        state, prefilled_link = "skip", None
-
-    if state == "blocked":
-        await interaction.response.send_message(view=JoinCheckView(request_type, interaction.user.id), ephemeral=True)
-    else:
-        await interaction.response.send_modal(RequestModal(request_type, interaction.user.id, prefilled_link))
+    # Let the requester complete the form first. The Roblox presence/joinability check
+    # runs after they submit it, against the username they entered.
+    await interaction.response.send_modal(RequestModal(request_type, interaction.user.id))
 
 
 class LinkRequiredView(BlacklistGate, discord.ui.LayoutView):
@@ -1702,11 +1753,11 @@ class RequestModal(discord.ui.Modal):
                 placeholder="https://www.roblox.com/games/...", max_length=300)
             self.add_item(self.server_link)
 
-        # Linked members use their linked Roblox account - they are never asked for a username.
-        self.username = None
-        if not self.linked:
-            self.username = discord.ui.TextInput(label="Your Roblox username", default=saved_roblox_name(user_id), max_length=40)
-            self.add_item(self.username)
+        # Always show the Roblox username so a requester can correct it for this request.
+        self.username = discord.ui.TextInput(
+            label="Your Roblox username", default=saved_roblox_name(user_id),
+            placeholder="Enter the Roblox account you are currently using", max_length=40)
+        self.add_item(self.username)
 
     async def on_submit(self, interaction: discord.Interaction):
         link = self.server_link.value.strip() if self.server_link else ""
@@ -1735,15 +1786,12 @@ class RequestModal(discord.ui.Modal):
             return await interaction.followup.send(rate_limit_text(count, resets, limit), ephemeral=True)
 
         session = interaction.client.session
-        if self.linked:
-            roblox_id, roblox_name = self.linked["roblox_id"], self.linked["roblox_username"]
-        else:
-            typed_name = self.username.value.strip().lstrip("@")
-            roblox = await get_roblox_profile(session, typed_name)
-            if not roblox:
-                return await interaction.followup.send(
-                    f"I could not find a Roblox account named **{typed_name}**. Check the spelling and try again.", ephemeral=True)
-            roblox_id, roblox_name = roblox
+        typed_name = self.username.value.strip().lstrip("@")
+        roblox = await get_roblox_profile(session, typed_name)
+        if not roblox:
+            return await interaction.followup.send(
+                f"I could not find a Roblox account named **{typed_name}**. Check the spelling and try again.", ephemeral=True)
+        roblox_id, roblox_name = roblox
 
         ok, error, verified_link = await verify_requester(session, roblox_id, link)
         if not ok:
@@ -1766,19 +1814,22 @@ class RequestModal(discord.ui.Modal):
         setup_on = is_setup(guild.id)
         type_number = next_type_number(guild.id, self.request_type) if setup_on else None
 
-        ping = None
         ping_roles = []
         if setup_on:
-            ping_role = ping_role_for(guild, self.request_type)
-            if ping_role is not None:
-                ping_roles.append(ping_role)
-            region_role = regional_ping_role_for(guild, region)
-            if region_role is not None and region_role not in ping_roles:
-                ping_roles.append(region_role)
-        if ping_roles:
-            ping = " ".join(role.mention for role in ping_roles)
-        if ping is None and PING_ROLE_ID:
-            ping = f"<@&{PING_ROLE_ID}>"
+            global_support = find_named_role(guild, GLOBAL_SUPPORT_ROLE_ID, GLOBAL_SUPPORT_ROLE_NAME)
+            if global_support is None:
+                global_support = await ensure_role(
+                    guild, GLOBAL_SUPPORT_ROLE_ID, GLOBAL_SUPPORT_ROLE_NAME, mentionable=True, lines=[])
+            region_role = specific_region_support_role_for(guild, region)
+            region_key = regional_ping_key(region)
+            if region_role is None and region_key:
+                _, region_role_name = REGION_PING_ROLES[region_key]
+                region_role = await ensure_role(
+                    guild, 0, region_role_name, mentionable=True, lines=[])
+            for role in (region_role, global_support):
+                if role is not None and role not in ping_roles:
+                    ping_roles.append(role)
+        ping = " ".join(role.mention for role in ping_roles) or None
 
         ticket = {
             "guild_id": guild.id, "raid_number": raid_number, "type_number": type_number,
@@ -1797,7 +1848,8 @@ class RequestModal(discord.ui.Modal):
 
         viewer = guild.get_role(VIEWER_ROLE_ID) or guild.default_role
         overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            # Tickets are visible to the server, but only the requester and confirmed helpers can chat.
+            guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True, manage_channels=True, attach_files=True),
         }
@@ -1874,9 +1926,6 @@ class TicketView(BlacklistGate, discord.ui.LayoutView):
         url = roblox_profile_url(t.get("roblox_id"))
         label = ticket_label(t)
 
-        if t.get("ping"):
-            self.add_item(discord.ui.TextDisplay(t["ping"]))
-
         children = []
         if is_open:
             edit_btn = discord.ui.Button(label="Edit", style=discord.ButtonStyle.secondary, custom_id=f"tsb:edit:{channel_id}")
@@ -1889,8 +1938,8 @@ class TicketView(BlacklistGate, discord.ui.LayoutView):
         name, display = t["roblox_username"], t.get("roblox_display")
         shown = f"{display} (@{name})" if display and display.lower() != name.lower() else f"@{name}"
         who = (f"## [{shown}]({url})" if url else f"## {shown}") + \
-              f"\n{t.get('ping') or 'The required helpers'} will assist. Double-check all details before joining. " \
-              'Rename fields freely, e.g., “Anyone Attacking Me” for “Enemy player names”. Make sure every field is filled out correctly so we can handle your request faster.'
+              f"\n{t.get('ping') or '**Global Teamers Support**'} will assist. Double-check all details and, if needed, use **Edit** to correct details such as the server region. " \
+              "Accurate information helps the backup crew avoid targeting innocent players and handle your request faster."
         if t.get("avatar_url"):
             children.append(discord.ui.Section(discord.ui.TextDisplay(who), accessory=discord.ui.Thumbnail(t["avatar_url"])))
         else:
@@ -2094,16 +2143,24 @@ class JoinRobloxModal(discord.ui.Modal, title="Join Raid"):
         await refresh_ticket_message(channel, ticket)
 
         join_view = discord.ui.View(timeout=None)
-        if ticket.get("server_link"):
-            join_view.add_item(discord.ui.Button(label="Join Server", style=discord.ButtonStyle.link, url=ticket["server_link"]))
+        place_id, job_id = parse_roblox_link(ticket.get("server_link") or "")
+        if place_id:
+            join_view.add_item(discord.ui.Button(
+                label="Join Server", style=discord.ButtonStyle.link,
+                url=roblox_join_link(place_id, job_id) if job_id else roblox_game_page_url(place_id)))
         profile_url = roblox_profile_url(roblox_id)
         if profile_url:
             join_view.add_item(discord.ui.Button(label="Roblox Profile", style=discord.ButtonStyle.link, url=profile_url))
         await channel.send(f"<@{interaction.user.id}> joined the raid.", view=join_view)
 
         view = discord.ui.View(timeout=None)
-        view.add_item(discord.ui.Button(label="Open Server", style=discord.ButtonStyle.link, url=ticket["server_link"]))
-        await interaction.followup.send("You're in. Press the button below to open the server.", view=view, ephemeral=True)
+        if place_id:
+            view.add_item(discord.ui.Button(
+                label="Join Server", style=discord.ButtonStyle.link,
+                url=roblox_join_link(place_id, job_id) if job_id else roblox_game_page_url(place_id)))
+        else:
+            view.add_item(discord.ui.Button(label="Open Server", style=discord.ButtonStyle.link, url=ticket["server_link"]))
+        await interaction.followup.send("You're in. Choose your Roblox client/account in the join prompt.", view=view, ephemeral=True)
 
 
 # ======================================================
@@ -2179,22 +2236,15 @@ class PostEndView(BlacklistGate, discord.ui.View):
             # image used to show up blank in raid results.
             try:
                 raw = await att.read()
-                normalized_image = Image is not None
-                ext = ".jpg" if normalized_image else os.path.splitext(att.filename)[1].lower()
+                ext = os.path.splitext(att.filename)[1].lower()
                 if ext not in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
                     ext = ".png"
-                if normalized_image:
-                    with Image.open(io.BytesIO(raw)) as source:
-                        normalized = ImageOps.fit(source.convert("RGB"), GANK_IMAGE_SIZE,
-                                                  method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
-                        output = io.BytesIO()
-                        normalized.save(output, format="JPEG", quality=90, optimize=True)
-                        raw = output.getvalue()
                 os.makedirs(GANK_DIR, exist_ok=True)
                 path = os.path.join(GANK_DIR, f"{ticket['guild_id']}_{ticket['raid_number']}{ext}")
                 with open(path, "wb") as f:
                     f.write(raw)
                 ticket["gank_file"] = path
+                ticket["gank_filename"] = os.path.basename(att.filename) or f"gank{ext}"
             except (discord.HTTPException, OSError, ValueError) as exc:
                 print(f"[{BOT_NAME}] Could not keep the gank image: {exc!r}")
             ticket["gank_url"] = att.url
@@ -2216,7 +2266,8 @@ class PostEndView(BlacklistGate, discord.ui.View):
 class ResultView(BlacklistGate, discord.ui.LayoutView):
     """The raid result card (Raiders button in the header, gank image inside the card)."""
 
-    def __init__(self, channel_id: int, ticket: dict, gank_name: str | None = None):
+    def __init__(self, channel_id: int, ticket: dict, gank_name: str | None = None,
+                 preview_url: str | None = None, full_size_url: str | None = None):
         super().__init__(timeout=None)
         self.channel_id = channel_id
         raiders = discord.ui.Button(label="Raiders", style=discord.ButtonStyle.secondary, custom_id=f"tsb:raiders:{channel_id}")
@@ -2247,8 +2298,9 @@ class ResultView(BlacklistGate, discord.ui.LayoutView):
         ]
         if ticket.get("experience"):
             children += [discord.ui.Separator(), discord.ui.TextDisplay(f"## Experience\n> {_clean(ticket['experience'], 500)}")]
-        if gank_name:
-            children += [discord.ui.Separator(), gallery(f"attachment://{gank_name}")]
+        preview = preview_url or (f"attachment://{gank_name}" if gank_name else None)
+        if preview:
+            children += [discord.ui.Separator(), gallery(preview)]
         children += [
             discord.ui.Separator(),
             discord.ui.TextDisplay(
@@ -2258,6 +2310,8 @@ class ResultView(BlacklistGate, discord.ui.LayoutView):
                 "-# The raid is ended. Those who are still in the server, you can leave."),
         ]
         self.add_item(discord.ui.Container(*children, accent_colour=color))
+        if full_size_url:
+            self.add_item(discord.ui.ActionRow(link_btn("Open full-size image", full_size_url)))
 
     async def raiders_callback(self, interaction: discord.Interaction):
         ticket = get_ticket(self.channel_id)
@@ -2277,7 +2331,7 @@ async def load_gank(ticket: dict, session):
     try:
         if path and os.path.exists(path):
             with open(path, "rb") as f:
-                return f.read(), "gank" + (os.path.splitext(path)[1] or ".png")
+                return f.read(), ticket.get("gank_filename") or ("gank" + (os.path.splitext(path)[1] or ".png"))
     except OSError:
         pass
     url = ticket.get("gank_url")
@@ -2285,10 +2339,28 @@ async def load_gank(ticket: dict, session):
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
-                    return await resp.read(), "gank.png"
+                    return await resp.read(), ticket.get("gank_filename") or "gank.png"
         except Exception:
             pass
     return None, None
+
+
+def make_gank_preview(raw: bytes) -> bytes:
+    """Create a fixed-size cropped display copy while leaving the original attachment untouched."""
+    if Image is None or ImageOps is None:
+        print(f"[{BOT_NAME}] Pillow is missing; install requirements.txt to create uniform gank previews.")
+        return raw
+    try:
+        with Image.open(io.BytesIO(raw)) as source:
+            preview = ImageOps.fit(source.convert("RGB"), GANK_IMAGE_SIZE,
+                                   method=getattr(getattr(Image, "Resampling", Image), "LANCZOS"),
+                                   centering=(0.5, 0.5))
+            output = io.BytesIO()
+            preview.save(output, format="JPEG", quality=90, optimize=True)
+            return output.getvalue()
+    except Exception as exc:
+        print(f"[{BOT_NAME}] Could not create fixed-size gank preview: {exc!r}")
+        return raw
 
 
 async def finalize_raid(bot_client: commands.Bot, guild: discord.Guild, channel: discord.TextChannel, ticket: dict):
@@ -2318,11 +2390,23 @@ async def finalize_raid(bot_client: commands.Bot, guild: discord.Guild, channel:
         results_msg = None
         if data:
             try:
+                preview_data = make_gank_preview(data)
+                preview_name = "gank-preview.jpg"
                 results_msg = await results_channel.send(
-                    view=ResultView(channel.id, ticket, gname),
-                    files=[discord.File(io.BytesIO(data), filename=gname)], allowed_mentions=mentions)
+                    view=ResultView(channel.id, ticket, preview_name),
+                    files=[
+                        discord.File(io.BytesIO(preview_data), filename=preview_name),
+                        # Keep the original available at full resolution; spoiler hides its inline preview.
+                        discord.File(io.BytesIO(data), filename=gname, spoiler=True),
+                    ], allowed_mentions=mentions)
                 if results_msg.attachments:
-                    ticket["gank_url"] = results_msg.attachments[0].url   # permanent copy in the results channel
+                    ticket["gank_preview_url"] = results_msg.attachments[0].url
+                    ticket["gank_full_url"] = (results_msg.attachments[1].url
+                                               if len(results_msg.attachments) > 1 else results_msg.attachments[0].url)
+                    ticket["gank_url"] = ticket["gank_full_url"]
+                    await results_msg.edit(view=ResultView(
+                        channel.id, ticket, gname,
+                        preview_url=ticket["gank_preview_url"], full_size_url=ticket["gank_full_url"]))
                 if ticket.get("gank_file"):
                     try:
                         os.remove(ticket["gank_file"])
@@ -2332,7 +2416,11 @@ async def finalize_raid(bot_client: commands.Bot, guild: discord.Guild, channel:
             except discord.HTTPException as exc:
                 print(f"[{BOT_NAME}] Result with image failed ({exc}); posting it without the image.")
         if results_msg is None:
-            results_msg = await results_channel.send(view=ResultView(channel.id, ticket, None), allowed_mentions=mentions)
+            results_msg = await results_channel.send(view=ResultView(
+                channel.id, ticket, None,
+                preview_url=ticket.get("gank_preview_url"),
+                full_size_url=ticket.get("gank_full_url") or ticket.get("gank_url")),
+                allowed_mentions=mentions)
         ticket["results_url"] = results_msg.jump_url
         save_ticket(channel.id, ticket)
 
@@ -2557,30 +2645,54 @@ CHANNEL_TYPES = [
 ]
 
 
+async def get_or_create_categories(guild: discord.Guild) -> dict[str, discord.CategoryChannel]:
+    saved_map = DATA.get("category_map", {}).get(str(guild.id), {})
+    saved_ticket_id = saved_map.get("tickets", 0) if isinstance(saved_map, dict) else 0
+    categories = {
+        "cruxer": find_cruxer_category(guild),
+        "tickets": find_category(guild),
+    }
+    for key, name in (("cruxer", CRUXER_CATEGORY_NAME), ("tickets", AUTHORIZE_CATEGORY_NAME)):
+        category = categories[key]
+        if category is None:
+            configured_id = CRUXER_CATEGORY_ID if key == "cruxer" else TICKET_CATEGORY_ID
+            category = guild.get_channel(configured_id)
+            if not isinstance(category, discord.CategoryChannel):
+                category = await guild.create_category(name, reason=f"{BOT_NAME} /build")
+        is_custom_ticket_category = (
+            key == "tickets" and saved_ticket_id == category.id
+            and category.name.casefold() not in {AUTHORIZE_CATEGORY_NAME.casefold(), "crusher tickets"}
+        )
+        if category.name != name and not is_custom_ticket_category:
+            try:
+                await category.edit(name=name, reason=f"{BOT_NAME} category layout")
+            except discord.HTTPException:
+                pass
+        categories[key] = category
+    return categories
+
+
 async def get_or_create_category(guild: discord.Guild) -> discord.CategoryChannel:
-    category = find_category(guild)
-    if category is None:
-        category = await guild.create_category(AUTHORIZE_CATEGORY_NAME, reason=f"{BOT_NAME} /authorize setup")
-    elif category.name != AUTHORIZE_CATEGORY_NAME:
-        try:
-            await category.edit(name=AUTHORIZE_CATEGORY_NAME, reason=f"{BOT_NAME} rename")
-        except discord.HTTPException:
-            pass
-    return category
+    """Compatibility helper: ticket channels belong in Cruxer tickets."""
+    return (await get_or_create_categories(guild))["tickets"]
 
 
 async def run_setup(guild: discord.Guild, selected_keys: set):
     # Channel creation is explicitly requested through /build, after /authorize.
     selected_keys = set(selected_keys) | {"snipe", "readme", "warnings", "promotion"}
-    category = await get_or_create_category(guild)
-    DATA.setdefault("category_map", {})[str(guild.id)] = category.id
+    await ensure_guild_roles(guild)
+    categories = await get_or_create_categories(guild)
+    category = categories["cruxer"]
+    DATA.setdefault("category_map", {})[str(guild.id)] = {
+        key: value.id for key, value in categories.items()
+    }
     created = {}
 
     for key, label, configured_id, name in CHANNEL_TYPES:
         if key not in selected_keys:
             continue
         if key == "readme":
-            created[key] = await create_or_update_readme(guild, authorized=True)
+            created[key] = await create_or_update_readme(guild, authorized=True, category=category)
             continue
         channel = guild.get_channel(configured_id) if configured_id else None
         if not isinstance(channel, discord.TextChannel):
@@ -2588,6 +2700,11 @@ async def run_setup(guild: discord.Guild, selected_keys: set):
                 lambda c: isinstance(c, discord.TextChannel) and c.name.lower() == name, guild.text_channels)
         if channel is None:
             channel = await guild.create_text_channel(name, category=category, reason=f"{BOT_NAME} /build")
+        elif channel.category_id != category.id:
+            try:
+                await channel.edit(category=category, reason=f"{BOT_NAME} /build channel layout")
+            except discord.HTTPException:
+                pass
         created[key] = channel
 
     DATA.setdefault("channel_map", {}).setdefault(str(guild.id), {}).update(
@@ -2603,14 +2720,67 @@ async def run_setup(guild: discord.Guild, selected_keys: set):
         store_template(guild)
     except Exception as exc:
         print(f"[{BOT_NAME}] Could not store the server template: {exc!r}")
-    return category, created
+    return categories, created
+
+
+async def run_update(guild: discord.Guild):
+    """Create only missing Cruxer layout pieces and place utility channels in Cruxer."""
+    await ensure_guild_roles(guild)
+    categories = await get_or_create_categories(guild)
+    utility_category = categories["cruxer"]
+    ticket_category = categories["tickets"]
+    DATA.setdefault("category_map", {})[str(guild.id)] = {
+        key: value.id for key, value in categories.items()
+    }
+    created = {}
+    mapping = DATA.setdefault("channel_map", {}).setdefault(str(guild.id), {})
+    for key, label, configured_id, name in CHANNEL_TYPES:
+        if key == "readme":
+            existing_id = mapping.get("readme", 0)
+            existing = guild.get_channel(existing_id) if existing_id else None
+            if not isinstance(existing, discord.TextChannel):
+                existing = discord.utils.get(guild.text_channels, name=name)
+            channel = await create_or_update_readme(guild, authorized=True, target_channel=existing,
+                                                    category=utility_category)
+            if channel:
+                created[key] = channel
+                mapping[key] = channel.id
+            continue
+        channel = guild.get_channel(mapping.get(key, 0)) if mapping.get(key) else None
+        if not isinstance(channel, discord.TextChannel) and configured_id:
+            channel = guild.get_channel(configured_id)
+        if not isinstance(channel, discord.TextChannel):
+            channel = discord.utils.get(guild.text_channels, name=name)
+        target_category = ticket_category if key == "tickets" else utility_category
+        if channel is None:
+            channel = await guild.create_text_channel(name, category=target_category,
+                                                     reason=f"{BOT_NAME} /update")
+        elif channel.category_id != target_category.id:
+            try:
+                await channel.edit(category=target_category, reason=f"{BOT_NAME} /update layout")
+            except discord.HTTPException:
+                pass
+        created[key] = channel
+        mapping[key] = channel.id
+
+    save_data()
+    if created.get("battle_panel"):
+        await refresh_panel(created["battle_panel"])
+    if created.get("leaderboard"):
+        await refresh_leaderboard(created["leaderboard"])
+    try:
+        store_template(guild)
+    except Exception as exc:
+        print(f"[{BOT_NAME}] Could not update the server template: {exc!r}")
+    return categories, created
 
 
 async def find_bot_channels(guild: discord.Guild):
     found = []
-    category = find_category(guild)
-    if category:
-        found.extend(category.channels)
+    categories = [find_cruxer_category(guild), find_category(guild)]
+    for category in categories:
+        if category:
+            found.extend(category.channels)
     for key, label, configured_id, name in CHANNEL_TYPES:
         channel = guild.get_channel(configured_id) if configured_id else None
         if not isinstance(channel, discord.TextChannel):
@@ -2618,13 +2788,16 @@ async def find_bot_channels(guild: discord.Guild):
                 lambda c: isinstance(c, discord.TextChannel) and c.name.lower() == name, guild.text_channels)
         if channel and channel not in found:
             found.append(channel)
-    if category:
-        found.append(category)
+    found.extend(category for category in categories if category)
     return found
 
 
-def _setup_result_view(guild, category, created, mode: str):
-    lines = [f"- **Category:** {category.mention}"]
+def _setup_result_view(guild, categories, created, mode: str):
+    if isinstance(categories, dict):
+        lines = [f"- **Cruxer category:** {categories['cruxer'].mention}",
+                 f"- **Cruxer tickets category:** {categories['tickets'].mention}"]
+    else:  # legacy setup view
+        lines = [f"- **Cruxer category:** {categories.mention}"]
     for key, label, _, _ in CHANNEL_TYPES:
         if created.get(key):
             lines.append(f"- **{label}:** {created[key].mention}")
@@ -2640,12 +2813,12 @@ class ManualSetupSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
-            category, created = await run_setup(interaction.guild, set(self.values))
+            categories, created = await run_setup(interaction.guild, set(self.values))
         except discord.HTTPException as exc:
             print(f"[{BOT_NAME}] Manual build failed: HTTP {exc.status}, code {exc.code}: {exc}")
             return await interaction.followup.send(
                 f"Build failed (HTTP {exc.status}, Discord code {exc.code}). Check Manage Channels, Manage Roles, and channel overwrites.", ephemeral=True)
-        await interaction.followup.send(view=_setup_result_view(interaction.guild, category, created, "Manual"), ephemeral=True)
+        await interaction.followup.send(view=_setup_result_view(interaction.guild, categories, created, "Manual"), ephemeral=True)
 
 
 class ManualSetupView(discord.ui.View):
@@ -2661,8 +2834,8 @@ class AuthorizeConfirmView(discord.ui.View):
     @discord.ui.button(label="Auto Setup", style=discord.ButtonStyle.success)
     async def auto_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
-        category, created = await run_setup(interaction.guild, {key for key, _, _, _ in CHANNEL_TYPES})
-        await interaction.followup.send(view=_setup_result_view(interaction.guild, category, created, "Auto"), ephemeral=True)
+        categories, created = await run_setup(interaction.guild, {key for key, _, _, _ in CHANNEL_TYPES})
+        await interaction.followup.send(view=_setup_result_view(interaction.guild, categories, created, "Auto"), ephemeral=True)
 
     @discord.ui.button(label="Manual Setup", style=discord.ButtonStyle.secondary)
     async def manual_setup(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2801,14 +2974,14 @@ async def make_leaderboard_view(client: commands.Bot, guild: discord.Guild, scop
                            stats_text=stats_text, rankings_text=rankings_text, total_members=len(entries))
 
 
-async def refresh_leaderboard(channel: discord.TextChannel):
+async def refresh_leaderboard(channel: discord.TextChannel, initial_scope: str = "global"):
     gid = str(channel.guild.id)
     lock = _refresh_locks.setdefault(f"lb:{gid}", asyncio.Lock())
     async with lock:
         await purge_old_messages(channel, "leaderboard")
-        view = await make_leaderboard_view(bot, channel.guild, "global", 0, None)
+        view = await make_leaderboard_view(bot, channel.guild, initial_scope, 0, None)
         new_msg = await channel.send(view=view)
-        leaderboard_state[new_msg.id] = {"scope": "global", "page": 0}
+        leaderboard_state[new_msg.id] = {"scope": initial_scope, "page": 0}
         DATA["leaderboard_messages"][gid] = new_msg.id
         DATA["leaderboard_channels"][gid] = channel.id
         save_data()
@@ -3040,18 +3213,47 @@ async def leaderboard_command(interaction: discord.Interaction):
     await interaction.followup.send("Leaderboard posted.", ephemeral=True)
 
 
-@bot.tree.command(name="say", description="[OWN] Make Cruxer send a message")
-@app_commands.describe(message="The message Cruxer should send")
+@bot.tree.command(name="say", description="[OWN] Make Cruxer send a message (optionally as a reply, optionally with a file or GIF)")
+@app_commands.describe(message="The message Cruxer should send",
+                       reply_to="Reply to a message: paste its message ID or its message link",
+                       attachment="Optional image / GIF / file to send with it")
 @app_commands.guild_only()
-async def say_command(interaction: discord.Interaction, message: str):
+async def say_command(interaction: discord.Interaction, message: str = None, reply_to: str = None,
+                      attachment: discord.Attachment = None):
     if not can_use_own(interaction.user.id):
         return await interaction.response.send_message("You are not authorized to use this command.", ephemeral=True)
+    if not message and not attachment:
+        return await interaction.response.send_message("Type a message or add a file / GIF.", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
+
+    channel = interaction.channel
+    target = None
+    if reply_to:
+        nums = re.findall(r"\d{15,25}", reply_to)
+        if not nums:
+            return await interaction.followup.send("I could not read that message ID or link.", ephemeral=True)
+        if len(nums) >= 3:   # a full message link: .../channels/<server>/<channel>/<message>
+            if int(nums[-3]) != interaction.guild_id:
+                return await interaction.followup.send("That message link is from another server.", ephemeral=True)
+            channel = interaction.guild.get_channel_or_thread(int(nums[-2])) or channel
+        try:
+            target = await channel.fetch_message(int(nums[-1]))
+        except discord.NotFound:
+            return await interaction.followup.send("I could not find that message in that channel.", ephemeral=True)
+        except discord.Forbidden:
+            return await interaction.followup.send("I can't read that channel's messages.", ephemeral=True)
+
     try:
-        await interaction.channel.send(message)
-        await interaction.followup.send("Message sent.", ephemeral=True)
+        file = await attachment.to_file() if attachment else None
+        if target:   # a normal Discord reply (it pings the author like any reply)
+            await target.reply(content=message, file=file, mention_author=True)
+        else:
+            await channel.send(content=message, file=file)
+        await interaction.followup.send("Reply sent." if target else "Message sent.", ephemeral=True)
     except discord.Forbidden:
-        await interaction.followup.send("I don't have permission to send messages here.", ephemeral=True)
+        await interaction.followup.send("I don't have permission to send messages (or attach files) there.", ephemeral=True)
+    except discord.HTTPException as exc:
+        await interaction.followup.send(f"Discord refused it: `{exc.text}`", ephemeral=True)
 
 
 @bot.tree.command(name="ping", description="Check Cruxer's latency and connection")
@@ -3090,23 +3292,29 @@ async def nuke_command(interaction: discord.Interaction):
 
 
 # ======================================================
-# /setup (admin): typed pings, Tier roles, Tier limits, typed ticket names
+# Roles (created as part of /build)
 # ======================================================
 
 async def ensure_role(guild: discord.Guild, role_id: int, name: str, *, mentionable: bool, lines: list):
     role = find_named_role(guild, role_id, name)
     if role is not None:
         note = "already exists"
+        if role_id and role.id == role_id and role.name != name:
+            try:
+                await role.edit(name=name, reason=f"{BOT_NAME} role setup")
+                note = "renamed to match Cruxer"
+            except (discord.Forbidden, discord.HTTPException):
+                note = "already exists (could NOT rename - give me Manage Roles)"
         if mentionable and not role.mentionable:
             try:
-                await role.edit(mentionable=True, reason=f"{BOT_NAME} /setup")
+                await role.edit(mentionable=True, reason=f"{BOT_NAME} /build role setup")
                 note = "already exists (made mentionable)"
             except (discord.Forbidden, discord.HTTPException):
                 note = "already exists (could NOT make it mentionable - give me Manage Roles)"
         lines.append(f"- {role.mention} - {note}")
         return role
     try:
-        role = await guild.create_role(name=name, mentionable=mentionable, reason=f"{BOT_NAME} /setup")
+        role = await guild.create_role(name=name, mentionable=mentionable, reason=f"{BOT_NAME} /build role setup")
         lines.append(f"- {role.mention} - created")
         return role
     except (discord.Forbidden, discord.HTTPException):
@@ -3114,19 +3322,15 @@ async def ensure_role(guild: discord.Guild, role_id: int, name: str, *, mentiona
         return None
 
 
-@bot.tree.command(name="setup", description="Set up ping roles, Tier roles, Tier request limits and Raid/Backup ticket names")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-async def setup_command(interaction: discord.Interaction):
-    if not await require_admin(interaction):
-        return
-    await interaction.response.defer(ephemeral=True)
-    guild = interaction.guild
-
+async def ensure_guild_roles(guild: discord.Guild):
+    """Create the ping and Tier roles as part of /build or /update."""
     ping_lines: list = []
     await ensure_role(guild, RAID_PING_ROLE_ID, RAID_PING_ROLE_NAME, mentionable=True, lines=ping_lines)
     await ensure_role(guild, BACKUP_PING_ROLE_ID, BACKUP_PING_ROLE_NAME, mentionable=True, lines=ping_lines)
+    await ensure_role(guild, GLOBAL_SUPPORT_ROLE_ID, GLOBAL_SUPPORT_ROLE_NAME, mentionable=True, lines=ping_lines)
     for rid, name in REGION_PING_ROLES.values():
+        await ensure_role(guild, rid, name, mentionable=True, lines=ping_lines)
+    for rid, name in SPECIFIC_REGION_SUPPORT_ROLES.values():
         await ensure_role(guild, rid, name, mentionable=True, lines=ping_lines)
     tier_lines: list = []
     for tier in sorted(TIER_ROLE_IDS):
@@ -3142,25 +3346,8 @@ async def setup_command(interaction: discord.Interaction):
         if member is not None and await sync_tier_role(guild, member):
             promoted += 1
 
-    table = [f"- **Tier-{t}** - {TIER_RAIDS_NEEDED[t]}+ raids - {TIER_DAILY_LIMITS[t]} requests / 24h" for t in sorted(TIER_ROLE_IDS)]
-    table.append(f"- No Tier role - {DAILY_REQUEST_LIMIT} requests / 24h")
-    cookie_note = "" if ROBLOX_COOKIE else " (needs ROBLOX_COOKIE)"
-    view = card(
-        f"## {BOT_NAME} Setup Complete",
-        "**Ping Roles**\n" + "\n".join(ping_lines),
-        SEP,
-        "**Tier Roles** (raids only, backups do not count)\n" + "\n".join(tier_lines),
-        "\n".join(table) + (f"\n\nRoles given to existing members now: **{promoted}**" if promoted else ""),
-        SEP,
-        "**Now active**\n"
-        "- Raid tickets ping |Raid Ping|, Backup tickets ping |Backup Ping|\n"
-        "- Tickets are numbered separately: Raid-ticket #1, Backup-ticket #1\n"
-        f"- Offline helpers are reminded after {JOIN_WARNING_SECONDS // 60} minutes{cookie_note}\n"
-        "- Members pick their ping roles with `/pings`",
-        footer=f"{BOT_NAME} - my highest role must be above the Tier roles",
-        color=GREEN,
-    )
-    await interaction.followup.send(view=view, ephemeral=True)
+    save_data()
+    return {"ping_roles": ping_lines, "tier_roles": tier_lines, "promoted": promoted}
 
 
 raid_group = app_commands.Group(name="raid", description="Raid requests", guild_only=True)
@@ -3209,7 +3396,7 @@ async def resolve_prefix_target(ctx: commands.Context, text: str | None):
 @bot.command(name="av", aliases=["avatar", "pfp"])
 @commands.cooldown(1, 2.0, commands.BucketType.user)
 async def av_command(ctx: commands.Context, *, target: str = None):
-    """av [user] - avatar (all formats), banner and profile of a user."""
+    """av [user] - avatar (PNG / JPG / WEBP, plus GIF when animated), banner and username of a user."""
     if not mark_prefix_message_seen(ctx.message.id):
         return
     user = await resolve_prefix_target(ctx, target)
@@ -3236,29 +3423,8 @@ async def av_command(ctx: commands.Context, *, target: str = None):
     if member and member.guild_avatar and full.avatar and member.guild_avatar.key != full.avatar.key:
         desc += f"\n**Global avatar:** [Open]({full.avatar.replace(size=1024).url})"
 
-    created = int(full.created_at.timestamp())
-    acct = (f"**Username:** `{full.name}`\n**ID:** `{full.id}`\n**Mention:** <@{full.id}>\n"
-            f"**Bot:** {'Yes' if full.bot else 'No'}\n**Created:** <t:{created}:F> (<t:{created}:R>)")
-    badges = [f.name.replace("_", " ").title() for f in full.public_flags.all()]
-    if badges:
-        acct += f"\n**Badges:** {', '.join(badges)}"
-    server = None
-    if member:
-        joined = f"<t:{int(member.joined_at.timestamp())}:R>" if member.joined_at else "Unknown"
-        server = f"**Nickname:** {member.nick or 'None'}\n**Joined:** {joined}\n**Top role:** {member.top_role.mention}"
-    link = DATA["links"].get(str(full.id))
-    assists = DATA["stats"]["global"].get(str(full.id), 0)
-    cruxer = None
-    if link or assists:
-        roblox_text = f"[{link['roblox_username']}]({roblox_profile_url(link['roblox_id'])})" if link else "Not linked"
-        cruxer = f"**Roblox:** {roblox_text}\n**Global assists:** {assists:,}"
-
     blocks = [f"## Avatar - {name}\n{desc}", gallery(shown.replace(size=1024).url), SEP,
-              f"## Profile - {name}\n{acct}"]
-    if server:
-        blocks.append(f"**In This Server**\n{server}")
-    if cruxer:
-        blocks.append(f"**{BOT_NAME}**\n{cruxer}")
+              f"## Profile - {name}\n**Username:** `{full.name}`"]
     if full.banner:
         blocks.append(gallery(full.banner.replace(size=1024).url))
     buttons = [link_btn("Open Avatar", shown.replace(size=1024).url)]
@@ -3406,6 +3572,7 @@ async def set_count_command(interaction: discord.Interaction, member: discord.Me
     guild = interaction.guild
     gid, uid = str(guild.id), str(member.id)
     previous = get_raid_only_count(guild.id, member.id)
+    previous_tier = member_tier(member)
     DATA["stats"]["raid_assists"].setdefault(gid, {})[uid] = int(count)
     DATA["stats"]["guilds"].setdefault(gid, {})[uid] = int(count)
     save_data()
@@ -3421,8 +3588,17 @@ async def set_count_command(interaction: discord.Interaction, member: discord.Me
         return await interaction.response.send_message(
             f"Count saved as `{count}`, but I could not update the tier role. Check Manage Roles and role order. Error: `{exc}`",
             ephemeral=True)
-    if earned and (not current_roles or target not in current_roles):
-        promotion_channel = await get_promotion_channel(guild)
+    promotion_channel = await get_promotion_channel(guild)
+    if previous_tier is not None and (earned is None or earned > previous_tier):
+        if promotion_channel:
+            new_rank = f"Tier-{earned}" if earned is not None else "No Tier"
+            await promotion_channel.send(view=card(
+                "## Raider Rank Update", "### Demoted\n- Assist count changed by the Cruxer owner.", SEP,
+                f"### Member\n- <@{member.id}> - **{member.display_name}**\n"
+                f"- Previous rank: **Tier-{previous_tier}**\n- New rank: **{new_rank}**\n"
+                f"- Previous raid assists: `{previous}`\n- Current raid assists: `{count}`",
+                color=RED, footer=BOT_NAME), allowed_mentions=discord.AllowedMentions(users=True))
+    elif earned and (previous_tier is None or earned < previous_tier):
         if promotion_channel:
             nxt = earned - 1 if earned > 1 else None
             next_needed = max(0, TIER_RAIDS_NEEDED[nxt] - count) if nxt else None
@@ -3432,6 +3608,12 @@ async def set_count_command(interaction: discord.Interaction, member: discord.Me
                 f"- New Rank: {target.mention if target else f'**Tier-{earned}**'}", SEP,
                 f"### Next Rank: **Tier-{nxt}**\n- Rescues Needed: `{next_needed}`" if nxt else "### Highest rank reached",
                 footer=BOT_NAME), allowed_mentions=discord.AllowedMentions(users=True, roles=True))
+    leaderboard_channel = configured_channel(guild, "leaderboard", LEADERBOARD_CHANNEL_ID, LEADERBOARD_CHANNEL_NAME)
+    if leaderboard_channel:
+        try:
+            await refresh_leaderboard(leaderboard_channel, initial_scope="server")
+        except discord.HTTPException as exc:
+            print(f"[{BOT_NAME}] Could not refresh leaderboard after /set count: {exc!r}")
     await interaction.response.send_message(f"Set {member.mention}'s raid assist count to `{count}`.", ephemeral=True)
 
 
@@ -3455,7 +3637,8 @@ bot.tree.add_command(set_group)
     snipe="Roblox player server search results",
     warnings="Helper attendance and no-assist warnings",
     promotions="Tier promotion announcements",
-    read_me="Cruxer updates, rules, and command guide",
+    read_me="Cruxer information and developer profile",
+    ticket_category="Existing category where new Raid and Backup tickets should be created",
 )
 async def build_command(
     interaction: discord.Interaction,
@@ -3469,10 +3652,11 @@ async def build_command(
     warnings: discord.TextChannel = None,
     promotions: discord.TextChannel = None,
     read_me: discord.TextChannel = None,
+    ticket_category: discord.CategoryChannel = None,
 ):
     guild = interaction.guild
-    if interaction.user.id != guild.owner_id:
-        return await interaction.response.send_message("Only this server's owner can use `/build`.", ephemeral=True)
+    if interaction.user.id not in (guild.owner_id, DEVELOPER_ID):
+        return await interaction.response.send_message("Only this server's owner or the Cruxer developer can use `/build`.", ephemeral=True)
     if guild.id not in DATA["authorized_guilds"]:
         return await interaction.response.send_message("This server is not authorized yet. Ask the Cruxer owner to run `/authorize`.", ephemeral=True)
     if mode.value == "manual":
@@ -3490,6 +3674,7 @@ async def build_command(
                 f"Build failed (HTTP {exc.status}, Discord code {exc.code}). Check Manage Channels, Manage Roles, and channel overwrites.", ephemeral=True)
         return await interaction.followup.send(view=_setup_result_view(guild, category, created, "Automatic build"), ephemeral=True)
 
+    await ensure_guild_roles(guild)
     chosen = {
         "battle_panel": battle_panel, "raid_results": raid_results, "leaderboard": leaderboard,
         "logs": logs, "mvps": mvps, "snipe": snipe, "warnings": warnings,
@@ -3497,12 +3682,19 @@ async def build_command(
     }
     mapping = DATA.setdefault("channel_map", {}).setdefault(str(guild.id), {})
     mapping.update({key: channel.id for key, channel in chosen.items() if channel is not None})
-    if not any(chosen.values()):
+    category_map = DATA.setdefault("category_map", {}).setdefault(str(guild.id), {})
+    if ticket_category is not None:
+        if not isinstance(category_map, dict):
+            category_map = {"tickets": int(category_map)} if category_map else {}
+            DATA["category_map"][str(guild.id)] = category_map
+        category_map["tickets"] = ticket_category.id
+    if not any(chosen.values()) and ticket_category is None:
         return await interaction.response.send_message(
             view=card("## Choose existing channels", "Pick at least one channel.\n\n"
+                      "You can also select **Ticket Category** in the command options to choose where new tickets are created.\n\n"
                       "**What each channel is for**\n"
                       "Battle Panel: requests. Raid Results: completed raids. Leaderboard: rankings. Logs: ticket events.\n"
-                      "MVPs: helper highlights. Snipe: Roblox search results. Warnings: helper attendance. Promotions: tier upgrades. Read-me: updates, rules, and commands.",
+                      "MVPs: helper highlights. Snipe: Roblox search results. Warnings: helper attendance. Promotions: tier upgrades. Read-me: Cruxer and developer profile.",
                       footer=BOT_NAME), ephemeral=True)
     await interaction.response.defer(ephemeral=True)
     save_data()
@@ -3513,7 +3705,38 @@ async def build_command(
     if read_me:
         await create_or_update_readme(guild, authorized=True, target_channel=read_me)
     await interaction.followup.send(
-        view=card("## Channel mapping saved", "Cruxer will use the selected channels. You can move or remap channels later with `/build mode:Choose existing channels`.",
+        view=card("## Channel mapping saved",
+                  "Cruxer will use the selected channels" +
+                  (f" and create new tickets under **{ticket_category.name}**." if ticket_category else ".") +
+                  " You can move or remap channels later with `/build mode:Choose existing channels`.",
+                  color=GREEN, footer=BOT_NAME), ephemeral=True)
+
+
+@bot.tree.command(name="update", description="Create missing Cruxer categories and channels without duplicating existing ones")
+@app_commands.guild_only()
+async def update_layout_command(interaction: discord.Interaction):
+    guild = interaction.guild
+    if interaction.user.id not in (guild.owner_id, DEVELOPER_ID):
+        return await interaction.response.send_message(
+            "Only this server's owner or the Cruxer developer can use `/update`.", ephemeral=True)
+    if guild.id not in DATA["authorized_guilds"]:
+        return await interaction.response.send_message(
+            "This server is not authorized yet. Ask the Cruxer developer to run `/authorize` first.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+    try:
+        categories, channels = await run_update(guild)
+    except discord.HTTPException as exc:
+        print(f"[{BOT_NAME}] Update failed: HTTP {exc.status}, code {exc.code}: {exc}")
+        return await interaction.followup.send(
+            f"Update failed (HTTP {exc.status}, Discord code {exc.code}). Check Manage Channels and channel permissions.",
+            ephemeral=True)
+    await interaction.followup.send(
+        view=card("## Cruxer layout updated",
+                  "Missing channels were created, existing channels were reused, and utility channels were placed under Cruxer. "
+                  "No duplicate channels were intentionally created.", SEP,
+                  f"**Cruxer:** {categories['cruxer'].mention}\n"
+                  f"**Cruxer tickets:** {categories['tickets'].mention}\n"
+                  f"**Channels checked:** `{len(channels)}`",
                   color=GREEN, footer=BOT_NAME), ephemeral=True)
 
 
@@ -3571,7 +3794,7 @@ async def overview_command(interaction: discord.Interaction):
         f"**Open tickets:** `{open_tickets}`\n"
         f"**Total raids logged:** `{DATA['raid_counters'].get(gid, 0)}`\n"
         f"**Total assists (server):** `{sum(DATA['stats']['guilds'].get(gid, {}).values())}`\n"
-        f"**/setup done:** {'Yes' if is_setup(guild.id) else 'No'}\n"
+        f"**Authorized:** {'Yes' if is_setup(guild.id) else 'No'}\n"
         f"**Template stored:** {'Yes' if gid in DATA['templates'] else 'No (use /store)'}"
     )
     view = discord.ui.LayoutView(timeout=120)
@@ -4121,13 +4344,6 @@ async def bulk_unban_command(interaction: discord.Interaction, bot_id: str, hour
 
 
 bot.tree.add_command(bulk_group)
-
-
-@bot.tree.command(name="recruit", description="[DISABLED] Previously DM'd unbanned users with the server invite")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-async def recruit_command(interaction: discord.Interaction):
-    await interaction.response.send_message("This command has been removed.", ephemeral=True)
 
 
 # ======================================================
@@ -5387,6 +5603,8 @@ def helper_in_ticket_server(presence: dict | None, ticket: dict) -> bool:
 
 
 async def record_helper_warning(guild: discord.Guild, ticket: dict, user_id: int, reason: str) -> tuple[int, bool]:
+    if user_id in (DEVELOPER_ID, guild.owner_id):
+        return int(DATA.get("helper_warnings", {}).get(str(guild.id), {}).get(str(user_id), 0)), False
     gid, uid = str(guild.id), str(user_id)
     by_guild = DATA.setdefault("helper_warnings", {}).setdefault(gid, {})
     count = int(by_guild.get(uid, 0)) + 1
@@ -5401,17 +5619,18 @@ async def record_helper_warning(guild: discord.Guild, ticket: dict, user_id: int
             except (discord.Forbidden, discord.HTTPException) as exc:
                 print(f"[{BOT_NAME}] Could not demote warned helper {user_id}: {exc!r}")
     save_data()
-    warning_channel = await get_warnings_channel(guild)
-    if warning_channel:
-        title = "Helper Demotion" if demoted else "Helper Warning"
-        rank_line = "Tier role removed after exceeding the 15-warning limit." if demoted else f"Warnings: `{count}/{HELPER_WARNING_LIMIT}`."
-        try:
-            await warning_channel.send(view=card(
-                f"## {title}", f"Member: <@{user_id}>\nTicket: {ticket_label(ticket)}\nReason: {reason}\n{rank_line}",
-                color=RED if demoted else YELLOW, footer=BOT_NAME),
-                allowed_mentions=discord.AllowedMentions(users=True))
-        except discord.HTTPException as exc:
-            print(f"[{BOT_NAME}] Could not post helper warning: {exc!r}")
+    if demoted:
+        promotion_channel = await get_promotion_channel(guild)
+        if promotion_channel:
+            rank_line = "Tier role removed after exceeding the 15-warning limit."
+            try:
+                await promotion_channel.send(view=card(
+                    "## Helper Demotion", f"Member: <@{user_id}>\nTicket: {ticket_label(ticket)}\n"
+                    f"Reason: {reason}\nWarnings: `{count}/{HELPER_WARNING_LIMIT}`.\n{rank_line}",
+                    color=RED, footer=BOT_NAME),
+                    allowed_mentions=discord.AllowedMentions(users=True))
+            except discord.HTTPException as exc:
+                print(f"[{BOT_NAME}] Could not post helper demotion for {user_id}: {exc!r}")
     return count, demoted
 
 
@@ -5447,32 +5666,8 @@ async def join_watch_loop():
             h["seen_online"] = True
             changed.add(cid)
             continue
-        elapsed = now - h.get("joined_at", now)
-        channel = bot.get_channel(int(cid))
-        guild = channel.guild if channel else None
-
-        for stage, flag, after, title, text in (
-            ("first", "warned", JOIN_WARNING_SECONDS, "First warning",
-             "joined this {t} **{m} minutes** ago but has not joined the requester's Roblox server. Roblox account: **{n}**."),
-            ("final", "final_warned", JOIN_FINAL_WARNING_SECONDS, "Final warning",
-             "has not joined the requester's Roblox server for **over {m} minutes** after joining this {t}. Roblox account: **{n}**."),
-        ):
-            if h.get(flag) or elapsed < after or (stage == "final" and not h.get("warned")):
-                continue
-            h[flag] = True
-            changed.add(cid)
-            if not channel:
-                continue
-            online_elsewhere = p.get("userPresenceType", 0) != 0
-            presence_reason = "Online in another Roblox server" if online_elsewhere else "Offline on Roblox"
-            body = f"**{title}:** <@{uid}> " + text.format(t=ticket["type"].lower(), m=after // 60, n=h["username"])
-            try:
-                await channel.send(view=card(body + f"\nStatus: **{presence_reason}**", color=YELLOW if stage == "first" else RED, buttons=[link_btn("Join Server", ticket.get("server_link"))]),
-                                   allowed_mentions=discord.AllowedMentions(users=True))
-            except discord.HTTPException:
-                pass
-            if guild:
-                await record_helper_warning(guild, ticket, int(uid), presence_reason)
+        # Record whether they ever reached the requested server, but do not warn mid-ticket.
+        # Attendance warnings are evaluated once, after the raid ends.
     for cid in changed:
         save_ticket(int(cid), DATA["tickets"][cid])
 
@@ -5491,9 +5686,12 @@ async def warn_offline_helpers(guild: discord.Guild, ticket: dict):
         return
     problems = []
     for uid in ticket["helper_order"]:
+        user_id = int(uid)
+        if user_id in (DEVELOPER_ID, guild.owner_id):
+            continue
         h = ticket["helpers"].get(uid, {})
         if not h.get("roblox_id"):
-            problems.append(f"- <@{uid}> - Roblox account `{h.get('username', 'unknown')}` was not found")
+            problems.append(f"- <@{uid}> - could not verify Roblox attendance; no warning counted")
             continue
         if h.get("seen_online"):
             continue
@@ -5503,14 +5701,18 @@ async def warn_offline_helpers(guild: discord.Guild, ticket: dict):
             continue
         if p is not None:
             state = "online in a different server" if p.get("userPresenceType", 0) != 0 else "offline"
-            problems.append(f"- <@{uid}> - [{h['username']}]({roblox_profile_url(h['roblox_id'])}) was {state}, not in the requested server")
-            await record_helper_warning(guild, ticket, int(uid), f"Ticket ended before joining the requested Roblox server ({state})")
+            count, demoted = await record_helper_warning(
+                guild, ticket, user_id, f"Ticket ended before joining the requested Roblox server ({state})")
+            demotion_text = " - Tier removed" if demoted else ""
+            problems.append(
+                f"- <@{uid}> - [{h['username']}]({roblox_profile_url(h['roblox_id'])}) was {state}, "
+                f"not in the requested server. Warnings: `{count}/{HELPER_WARNING_LIMIT}`{demotion_text}.")
     if not problems:
         return
     target = await get_warnings_channel(guild) or await get_logs_channel(guild)
     if target:
-        await target.send(view=card(f"## Offline Helper Warning - {ticket_label(ticket)}",
-                                    "These helpers joined this raid but were still not online when it ended:\n" + "\n".join(problems),
+        await target.send(view=card(f"## Helper Attendance Warnings - {ticket_label(ticket)}",
+                                    "These helpers were checked once after the ticket ended:\n" + "\n".join(problems),
                                     color=RED, footer=BOT_NAME), allowed_mentions=discord.AllowedMentions.none())
 
 
@@ -5622,7 +5824,7 @@ class PingsView(BlacklistGate, discord.ui.LayoutView):
         if member is not None and getattr(member, "guild", None):
             r, b = ping_role_for(member.guild, "Raid"), ping_role_for(member.guild, "Backup")
             have_raid, have_backup = bool(r and r in member.roles), bool(b and b in member.roles)
-            for key, (rid, name) in REGION_PING_ROLES.items():
+            for key, (rid, name) in SUPPORT_ALERT_ROLES.items():
                 role = find_named_role(member.guild, rid, name)
                 if role and role in member.roles:
                     have_regions.add(key)
@@ -5633,9 +5835,9 @@ class PingsView(BlacklistGate, discord.ui.LayoutView):
                 discord.SelectOption(label="Backup Ping", value="backup", description="Get pinged for new Backup requests", default=have_backup),
             ])
         region_select = discord.ui.Select(
-            placeholder="Choose regional support alerts", custom_id="tsb:pings:regions", min_values=0, max_values=len(REGION_PING_ROLES),
+            placeholder="Choose regional support alerts", custom_id="tsb:pings:regions", min_values=0, max_values=len(SUPPORT_ALERT_ROLES),
             options=[discord.SelectOption(label=name, value=key, default=key in have_regions)
-                     for key, (_, name) in REGION_PING_ROLES.items()])
+                     for key, (_, name) in SUPPORT_ALERT_ROLES.items()])
 
         async def request_callback(interaction: discord.Interaction):
             await self.apply_roles(interaction, "requests", set(interaction.data.get("values", [])))
@@ -5669,7 +5871,7 @@ class PingsView(BlacklistGate, discord.ui.LayoutView):
                 elif key not in chosen and role in member.roles:
                     remove.append(role)
         else:
-            for key, (rid, name) in REGION_PING_ROLES.items():
+            for key, (rid, name) in SUPPORT_ALERT_ROLES.items():
                 role = find_named_role(guild, rid, name)
                 if role is None and key in chosen:
                     role = await ensure_role(guild, rid, name, mentionable=True, lines=[])
@@ -6494,9 +6696,9 @@ async def on_ready():
 
         if guild.id in DATA["authorized_guilds"]:
             await ensure_snipe_channel(guild)
-            category = find_category(guild)
+            category = find_cruxer_category(guild)
             if category is not None and category.name.lower() == LEGACY_BOT_NAME.lower():
-                await get_or_create_category(guild)   # renames the old Imperium category to Cruxer
+                await get_or_create_categories(guild)
             if configured_channel(guild, "readme", 0, README_CHANNEL_NAME):
                 await create_or_update_readme(guild, authorized=True)
             if gid not in DATA["templates"]:
